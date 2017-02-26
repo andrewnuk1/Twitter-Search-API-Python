@@ -1,18 +1,25 @@
-import requests
+import urllib2
 import json
 import datetime
 from abc import ABCMeta
+from urllib import urlencode
 from abc import abstractmethod
-from urllib import parse
+from urlparse import urlunparse
 from bs4 import BeautifulSoup
 from time import sleep
-from concurrent.futures import ThreadPoolExecutor
 import logging as log
+from xlwt import Workbook
 
 __author__ = 'Tom Dickinson'
+__contributor__ = 'andewnuk1'
 
+# create excel workbook
+wb = Workbook()
+sheet1 = wb.add_sheet('Sheet 1')
 
-class TwitterSearch(metaclass=ABCMeta):
+class TwitterSearch:
+
+    __metaclass__ = ABCMeta
 
     def __init__(self, rate_delay, error_delay=5):
         """
@@ -66,19 +73,18 @@ class TwitterSearch(metaclass=ABCMeta):
         try:
             # Specify a user agent to prevent Twitter from returning a profile card
             headers = {
-                'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.'
-                              '86 Safari/537.36'
+                'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36'
             }
-            req = requests.get(url, headers=headers)
-            # response = urllib2.urlopen(req)
-            data = json.loads(req.text)
+            req = urllib2.Request(url, headers=headers)
+            response = urllib2.urlopen(req)
+            data = json.loads(response.read())
             return data
 
         # If we get a ValueError exception due to a request timing out, we sleep for our error delay, then make
         # another attempt
-        except Exception as e:
-            log.error(e)
-            log.error("Sleeping for %i" % self.error_delay)
+        except ValueError as e:
+            print e.message
+            print "Sleeping for %i" % self.error_delay
             sleep(self.error_delay)
             return self.execute_search(url)
 
@@ -89,7 +95,7 @@ class TwitterSearch(metaclass=ABCMeta):
         :param items_html: The HTML block with tweets
         :return: A JSON list of tweets
         """
-        soup = BeautifulSoup(items_html, "html.parser")
+        soup = BeautifulSoup(items_html, "html")
         tweets = []
         for li in soup.find_all("li", class_='js-stream-item'):
 
@@ -111,7 +117,7 @@ class TwitterSearch(metaclass=ABCMeta):
             # Tweet Text
             text_p = li.find("p", class_="tweet-text")
             if text_p is not None:
-                tweet['text'] = text_p.get_text()
+                tweet['text'] = text_p.get_text().encode('utf-8')
 
             # Tweet User ID, User Screen Name, User Name
             user_details_div = li.find("div", class_="tweet")
@@ -158,8 +164,8 @@ class TwitterSearch(metaclass=ABCMeta):
         if max_position is not None:
             params['max_position'] = max_position
 
-        url_tupple = ('https', 'twitter.com', '/i/search/timeline', '', parse.urlencode(params), '')
-        return parse.urlunparse(url_tupple)
+        url_tupple = ('https', 'twitter.com', '/i/search/timeline', '', urlencode(params), '')
+        return urlunparse(url_tupple)
 
     @abstractmethod
     def save_tweets(self, tweets):
@@ -193,10 +199,10 @@ class TwitterSearchImpl(TwitterSearch):
             if tweet['created_at'] is not None:
                 t = datetime.datetime.fromtimestamp((tweet['created_at']/1000))
                 fmt = "%Y-%m-%d %H:%M:%S"
-                log.info("%i [%s] - %s" % (self.counter, t.strftime(fmt), tweet['text']))
+                print "%i [%s] - %s" % (self.counter, t.strftime(fmt), tweet['text'])
 
             # When we've reached our max limit, return False so collection stops
-            if self.max_tweets is not None and self.counter >= self.max_tweets:
+            if self.counter >= self.max_tweets:
                 return False
 
         return True
@@ -209,23 +215,20 @@ class TwitterSlicer(TwitterSearch):
     The only additional parameters a user has to input, is a minimum date, and a maximum date.
     This method also supports parallel scraping.
     """
-    def __init__(self, rate_delay, error_delay, since, until, n_threads=1):
+    def __init__(self, rate_delay, error_delay, since, until):
         super(TwitterSlicer, self).__init__(rate_delay, error_delay)
         self.since = since
         self.until = until
-        self.n_threads = n_threads
         self.counter = 0
 
     def search(self, query):
         n_days = (self.until - self.since).days
-        tp = ThreadPoolExecutor(max_workers=self.n_threads)
         for i in range(0, n_days):
             since_query = self.since + datetime.timedelta(days=i)
             until_query = self.since + datetime.timedelta(days=(i + 1))
             day_query = "%s since:%s until:%s" % (query, since_query.strftime("%Y-%m-%d"),
                                                   until_query.strftime("%Y-%m-%d"))
-            tp.submit(self.perform_search, day_query)
-        tp.shutdown(wait=True)
+            self.perform_search(day_query)
 
     def save_tweets(self, tweets):
         """
@@ -240,13 +243,20 @@ class TwitterSlicer(TwitterSearch):
                 fmt = "%Y-%m-%d %H:%M:%S"
                 log.info("%i [%s] - %s" % (self.counter, t.strftime(fmt), tweet['text']))
 
+                # we need to get this into unicode to write to the spreadsheet
+                to_print_text = "%i [%s] - %s" % (self.counter, t.strftime(fmt),tweet['text'])
+                to_print_text1 = to_print_text.decode('utf-8')
+
+                # write to excel but in rows of max 50,000 then move to new columns
+                sheet1.write((self.counter-1)-(int((self.counter-1)/50000)*50000),0 + (int((self.counter-1)/50000)*1), to_print_text1)
+
         return True
 
 
 if __name__ == '__main__':
     log.basicConfig(level=log.INFO)
 
-    search_query = "Babylon 5"
+    search_query = "@JustEatUK"
     rate_delay_seconds = 0
     error_delay_seconds = 5
 
@@ -255,13 +265,15 @@ if __name__ == '__main__':
     twit.search(search_query)
 
     # Example of using TwitterSlice
-    select_tweets_since = datetime.datetime.strptime("2016-10-01", '%Y-%m-%d')
-    select_tweets_until = datetime.datetime.strptime("2016-12-01", '%Y-%m-%d')
-    threads = 10
+    select_tweets_since = datetime.datetime.strptime("2017-01-01", '%Y-%m-%d')
+    select_tweets_until = datetime.datetime.strptime("2017-02-01", '%Y-%m-%d')
 
-    twitSlice = TwitterSlicer(rate_delay_seconds, error_delay_seconds, select_tweets_since, select_tweets_until,
-                              threads)
+    twitSlice = TwitterSlicer(rate_delay_seconds, error_delay_seconds, select_tweets_since, select_tweets_until)
     twitSlice.search(search_query)
 
     print("TwitterSearch collected %i" % twit.counter)
     print("TwitterSlicer collected %i" % twitSlice.counter)
+
+
+# excel
+wb.save('justeattwitter20170131.csv')
