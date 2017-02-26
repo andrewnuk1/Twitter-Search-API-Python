@@ -11,6 +11,8 @@ import logging as log
 from xlwt import Workbook
 
 __author__ = 'Tom Dickinson'
+
+# merely only added the ability to write the output to excel
 __contributor__ = 'andewnuk1'
 
 # create excel workbook
